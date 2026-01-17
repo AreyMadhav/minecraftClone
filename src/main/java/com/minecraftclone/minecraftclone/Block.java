@@ -1,13 +1,6 @@
 package com.minecraftclone.minecraftclone;
 
 public class Block {
-
-    Block(com.minecraftclone.minecraftclone.BlockType blockType, int i, int i0) {
-        throw new UnsupportedOperationException("Not supported yet."); // Generated from nbfs://nbhost/SystemFileSystem/Templates/Classes/Code/GeneratedMethodBody
-    }
-    public enum BlockType {
-    AIR, GRASS, DIRT, STONE, WOOD, LEAVES
-}
     private BlockType type;
     private int x;
     private int y;
@@ -18,9 +11,27 @@ public class Block {
         this.y = y;
     }
 
-    // Add getters and setters as needed
+    public BlockType getType() {
+        return type;
+    }
 
-    public int getType() {
-        throw new UnsupportedOperationException("Not supported yet."); // Generated from nbfs://nbhost/SystemFileSystem/Templates/Classes/Code/GeneratedMethodBody
+    public int getX() {
+        return x;
+    }
+
+    public int getY() {
+        return y;
+    }
+
+    public void setType(BlockType type) {
+        this.type = type;
+    }
+
+    public void setX(int x) {
+        this.x = x;
+    }
+
+    public void setY(int y) {
+        this.y = y;
     }
 }
