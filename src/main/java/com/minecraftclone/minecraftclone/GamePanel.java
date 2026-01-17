@@ -2,15 +2,16 @@ package com.minecraftclone.minecraftclone;
 
 import javax.swing.*;
 import java.awt.*;
+import java.util.Random;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.util.*;
 
 public class GamePanel extends JPanel implements Runnable {
-    private Block[][] world;
+    // No large full-world array: columns are generated per-chunk on demand
     private final int blockSize = 32;
-    private final int worldWidth = 25; // tiles
     private final int worldHeight = 18; // tiles
 
     private Thread gameThread;
@@ -23,37 +24,36 @@ public class GamePanel extends JPanel implements Runnable {
 
     // Hotbar / selected block
     private BlockType selectedBlock = BlockType.GRASS;
+    // Chunking for infinite horizontal world
+    private final int CHUNK_WIDTH = 16; // tiles per chunk
+    private final Map<Integer, Block[]> columns = new HashMap<>(); // key: tileX -> column array
+    private final Set<Integer> generatedChunks = new HashSet<>();
+    private final Map<Long, BlockType> modifications = new HashMap<>(); // player changes
+    private final long worldSeed = 0x5f3759dfL; // deterministic seed
+
+    // Camera (top-left in pixels)
+    private double cameraX = 0;
+    private double cameraY = 0;
 
     public GamePanel() {
-        setPreferredSize(new Dimension(worldWidth * blockSize, worldHeight * blockSize));
+        setPreferredSize(new Dimension(800, 600));
         setFocusable(true);
 
-        initWorld();
+        // Pre-generate a few chunks around spawn
         initPlayer();
+        ensureChunkGenerated(0);
+        ensureChunkGenerated(1);
+        ensureChunkGenerated(-1);
         setupInput();
     }
 
+    // world is generated per-chunk on demand; this method kept for compatibility (not used)
     private void initWorld() {
-        world = new Block[worldWidth][worldHeight];
-
-        int groundY = worldHeight / 2; // simple ground level
-        for (int x = 0; x < worldWidth; x++) {
-            for (int y = 0; y < worldHeight; y++) {
-                if (y < groundY) {
-                    world[x][y] = new Block(BlockType.AIR, x * blockSize, y * blockSize);
-                } else if (y == groundY) {
-                    world[x][y] = new Block(BlockType.GRASS, x * blockSize, y * blockSize);
-                } else if (y <= groundY + 2) {
-                    world[x][y] = new Block(BlockType.DIRT, x * blockSize, y * blockSize);
-                } else {
-                    world[x][y] = new Block(BlockType.STONE, x * blockSize, y * blockSize);
-                }
-            }
-        }
+        // no-op: generation happens lazily via ensureChunkGenerated
     }
 
     private void initPlayer() {
-        int spawnX = (worldWidth / 2) * blockSize;
+        int spawnX = 0 * blockSize; // spawn near x=0
         int spawnY = (worldHeight / 2 - 3) * blockSize;
         player = new Player(spawnX, spawnY);
     }
@@ -83,18 +83,19 @@ public class GamePanel extends JPanel implements Runnable {
         addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
-                int mx = e.getX();
-                int my = e.getY();
-                int tx = mx / blockSize;
-                int ty = my / blockSize;
-                if (tx < 0 || tx >= worldWidth || ty < 0 || ty >= worldHeight) return;
+                requestFocusInWindow();
+                double worldMX = cameraX + e.getX();
+                double worldMY = cameraY + e.getY();
+                int tx = (int)Math.floor(worldMX / blockSize);
+                int ty = (int)Math.floor(worldMY / blockSize);
+                if (ty < 0 || ty >= worldHeight) return;
 
                 if (SwingUtilities.isLeftMouseButton(e)) {
                     // break block
                     setBlock(tx, ty, BlockType.AIR);
                 } else if (SwingUtilities.isRightMouseButton(e)) {
                     // place block if empty
-                    if (getBlock(tx, ty).getType() == BlockType.AIR) {
+                    if (getBlock(tx, ty) == BlockType.AIR) {
                         setBlock(tx, ty, selectedBlock);
                     }
                 }
@@ -102,12 +103,121 @@ public class GamePanel extends JPanel implements Runnable {
         });
     }
 
-    private Block getBlock(int tx, int ty) {
-        return world[tx][ty];
+    private long keyFor(int tx, int ty) {
+        return (((long)tx) << 32) | (ty & 0xffffffffL);
+    }
+
+    private BlockType getBlock(int tx, int ty) {
+        if (ty < 0 || ty >= worldHeight) return BlockType.AIR;
+        long k = keyFor(tx, ty);
+        if (modifications.containsKey(k)) return modifications.get(k);
+
+        Block[] col = getColumn(tx);
+        if (col == null) return BlockType.AIR;
+        return col[ty].getType();
     }
 
     private void setBlock(int tx, int ty, BlockType type) {
-        world[tx][ty] = new Block(type, tx * blockSize, ty * blockSize);
+        if (ty < 0 || ty >= worldHeight) return;
+        long k = keyFor(tx, ty);
+        modifications.put(k, type);
+    }
+
+    private int chunkOf(int tx) {
+        return Math.floorDiv(tx, CHUNK_WIDTH);
+    }
+
+    private void ensureChunkGenerated(int cx) {
+        if (generatedChunks.contains(cx)) return;
+        generateChunk(cx);
+        // also mark generated so we don't repeat
+        generatedChunks.add(cx);
+    }
+
+    private Block[] getColumn(int tx) {
+        if (!columns.containsKey(tx)) {
+            int cx = chunkOf(tx);
+            // generate neighboring chunks to allow trees to span
+            ensureChunkGenerated(cx - 1);
+            ensureChunkGenerated(cx);
+            ensureChunkGenerated(cx + 1);
+        }
+        return columns.get(tx);
+    }
+
+    private void generateChunk(int cx) {
+        int startX = cx * CHUNK_WIDTH;
+        int endX = startX + CHUNK_WIDTH - 1;
+        // deterministic random for chunk
+        Random chunkRand = new Random(worldSeed ^ (cx * 341873128712L));
+
+        // precompute base phases for smooth surface
+        double phase1 = (chunkRand.nextDouble() - 0.5) * 2 * Math.PI;
+        double phase2 = (chunkRand.nextDouble() - 0.5) * 2 * Math.PI;
+
+        for (int tx = startX; tx <= endX; tx++) {
+            Block[] col = new Block[worldHeight];
+
+            // height function using combined sin waves for smooth terrain
+            double base = worldHeight / 2.0;
+            double val = Math.sin(tx * 0.12 + phase1) * 2.2 + Math.sin(tx * 0.05 + phase2) * 3.5;
+            int surf = (int)Math.round(base + val);
+            if (surf < 2) surf = 2;
+            if (surf > worldHeight - 6) surf = worldHeight - 6;
+
+            for (int y = 0; y < worldHeight; y++) {
+                if (y < surf) {
+                    col[y] = new Block(BlockType.AIR, tx * blockSize, y * blockSize);
+                } else if (y == surf) {
+                    col[y] = new Block(BlockType.GRASS, tx * blockSize, y * blockSize);
+                } else if (y <= surf + 2) {
+                    col[y] = new Block(BlockType.DIRT, tx * blockSize, y * blockSize);
+                } else {
+                    col[y] = new Block(BlockType.STONE, tx * blockSize, y * blockSize);
+                }
+            }
+
+            // simple caves
+            for (int y = surf + 2; y < worldHeight - 1; y++) {
+                Random r = new Random(worldSeed ^ (tx * 9301L) ^ (y * 49297L));
+                double depthFactor = (double)(y - surf) / (worldHeight - surf);
+                double caveChance = 0.02 + depthFactor * 0.08;
+                if (r.nextDouble() < caveChance) {
+                    col[y] = new Block(BlockType.AIR, tx * blockSize, y * blockSize);
+                }
+            }
+
+            columns.put(tx, col);
+        }
+
+        // After columns are generated, place trees deterministically; avoid calling getColumn
+        // to prevent recursive chunk generation. Only write into already-generated columns.
+        for (int tx = startX; tx <= endX; tx++) {
+            Random r = new Random(worldSeed ^ (tx * 341873128712L));
+            if (r.nextDouble() < 0.08) {
+                double base = worldHeight / 2.0;
+                double val = Math.sin(tx * 0.12 + ((worldSeed >>> 4) & 0xffff)) * 2.2 + Math.sin(tx * 0.05 + ((worldSeed >>> 8) & 0xffff)) * 3.5;
+                int surf = (int)Math.round(base + val);
+                if (surf < 4 || surf >= worldHeight) continue;
+                int trunk = 3 + r.nextInt(3);
+                // place trunk into this chunk's column if present
+                Block[] colTx = columns.get(tx);
+                for (int t = 1; t <= trunk; t++) {
+                    int ty = surf - t;
+                    if (ty >= 0 && ty < worldHeight && colTx != null) colTx[ty] = new Block(BlockType.WOOD, tx * blockSize, ty * blockSize);
+                }
+                int leafTop = surf - trunk - 1;
+                for (int lx = tx - 2; lx <= tx + 2; lx++) {
+                    Block[] colLx = columns.get(lx); // do not generate neighbor chunks here
+                    if (colLx == null) continue;
+                    for (int ly = leafTop; ly <= leafTop + 2; ly++) {
+                        if (ly >= 0 && ly < worldHeight) {
+                            if (colLx[ly].getType() == BlockType.AIR) colLx[ly] = new Block(BlockType.LEAVES, lx * blockSize, ly * blockSize);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     public void startGame() {
@@ -115,6 +225,7 @@ public class GamePanel extends JPanel implements Runnable {
         running = true;
         gameThread = new Thread(this, "GameThread");
         gameThread.start();
+        requestFocusInWindow();
     }
 
     public void stopGame() {
@@ -174,6 +285,17 @@ public class GamePanel extends JPanel implements Runnable {
         // vertical movement and collision
         player.y += player.vy;
         handleVerticalCollisions();
+
+        // update camera to center on player
+        int viewW = getWidth() > 0 ? getWidth() : 800;
+        int viewH = getHeight() > 0 ? getHeight() : 600;
+        cameraX = player.x - viewW / 2.0;
+        cameraY = player.y - viewH / 2.0;
+
+        // clamp vertical camera so it doesn't show outside world
+        double maxCamY = worldHeight * blockSize - viewH;
+        if (cameraY < 0) cameraY = 0;
+        if (cameraY > maxCamY) cameraY = maxCamY;
     }
 
     private void handleHorizontalCollisions() {
@@ -186,8 +308,8 @@ public class GamePanel extends JPanel implements Runnable {
             // moving right, check right side
             int tx = rightTile;
             for (int ty = topTile; ty <= bottomTile; ty++) {
-                if (tx >= 0 && tx < worldWidth && ty >= 0 && ty < worldHeight) {
-                    if (getBlock(tx, ty).getType() != BlockType.AIR) {
+                if (ty >= 0 && ty < worldHeight) {
+                    if (getBlock(tx, ty) != BlockType.AIR) {
                         player.x = tx * blockSize - player.width;
                         player.vx = 0;
                         break;
@@ -197,8 +319,8 @@ public class GamePanel extends JPanel implements Runnable {
         } else if (player.vx < 0) {
             int tx = leftTile;
             for (int ty = topTile; ty <= bottomTile; ty++) {
-                if (tx >= 0 && tx < worldWidth && ty >= 0 && ty < worldHeight) {
-                    if (getBlock(tx, ty).getType() != BlockType.AIR) {
+                if (ty >= 0 && ty < worldHeight) {
+                    if (getBlock(tx, ty) != BlockType.AIR) {
                         player.x = (tx + 1) * blockSize;
                         player.vx = 0;
                         break;
@@ -220,8 +342,8 @@ public class GamePanel extends JPanel implements Runnable {
             // falling, check bottom
             int ty = bottomTile;
             for (int tx = leftTile; tx <= rightTile; tx++) {
-                if (tx >= 0 && tx < worldWidth && ty >= 0 && ty < worldHeight) {
-                    if (getBlock(tx, ty).getType() != BlockType.AIR) {
+                if (ty >= 0 && ty < worldHeight) {
+                    if (getBlock(tx, ty) != BlockType.AIR) {
                         player.y = ty * blockSize - player.height;
                         player.vy = 0;
                         player.onGround = true;
@@ -232,8 +354,8 @@ public class GamePanel extends JPanel implements Runnable {
         } else if (player.vy < 0) {
             int ty = topTile;
             for (int tx = leftTile; tx <= rightTile; tx++) {
-                if (tx >= 0 && tx < worldWidth && ty >= 0 && ty < worldHeight) {
-                    if (getBlock(tx, ty).getType() != BlockType.AIR) {
+                if (ty >= 0 && ty < worldHeight) {
+                    if (getBlock(tx, ty) != BlockType.AIR) {
                         player.y = (ty + 1) * blockSize;
                         player.vy = 0;
                         break;
@@ -250,43 +372,42 @@ public class GamePanel extends JPanel implements Runnable {
         // Background
         g.setColor(new Color(135, 206, 235));
         g.fillRect(0, 0, getWidth(), getHeight());
+        // Determine visible tile range based on camera
+        int viewW = getWidth() > 0 ? getWidth() : 800;
+        int viewH = getHeight() > 0 ? getHeight() : 600;
 
-        // Draw blocks
-        for (int x = 0; x < worldWidth; x++) {
-            for (int y = 0; y < worldHeight; y++) {
-                Block b = world[x][y];
-                BlockType t = b.getType();
+        int tileStartX = (int)Math.floor(cameraX / blockSize) - 2;
+        int tileEndX = (int)Math.ceil((cameraX + viewW) / blockSize) + 2;
+        int tileStartY = Math.max(0, (int)Math.floor(cameraY / blockSize) - 1);
+        int tileEndY = Math.min(worldHeight - 1, (int)Math.ceil((cameraY + viewH) / blockSize) + 1);
+
+        for (int tx = tileStartX; tx <= tileEndX; tx++) {
+            for (int ty = tileStartY; ty <= tileEndY; ty++) {
+                BlockType t = getBlock(tx, ty);
                 if (t == BlockType.AIR) continue;
 
+                int px = tx * blockSize - (int)cameraX;
+                int py = ty * blockSize - (int)cameraY;
+
                 switch (t) {
-                    case GRASS:
-                        g.setColor(Color.GREEN);
-                        break;
-                    case DIRT:
-                        g.setColor(new Color(139, 69, 19));
-                        break;
-                    case STONE:
-                        g.setColor(Color.GRAY);
-                        break;
-                    case WOOD:
-                        g.setColor(new Color(160, 82, 45));
-                        break;
-                    case LEAVES:
-                        g.setColor(Color.GREEN.darker());
-                        break;
-                    default:
-                        g.setColor(Color.MAGENTA);
-                        break;
+                    case GRASS -> g.setColor(Color.GREEN);
+                    case DIRT -> g.setColor(new Color(139, 69, 19));
+                    case STONE -> g.setColor(Color.GRAY);
+                    case WOOD -> g.setColor(new Color(160, 82, 45));
+                    case LEAVES -> g.setColor(Color.GREEN.darker());
+                    default -> g.setColor(Color.MAGENTA);
                 }
-                g.fillRect(b.getX(), b.getY(), blockSize, blockSize);
+                g.fillRect(px, py, blockSize, blockSize);
                 g.setColor(Color.BLACK);
-                g.drawRect(b.getX(), b.getY(), blockSize, blockSize);
+                g.drawRect(px, py, blockSize, blockSize);
             }
         }
 
-        // Draw player
+        // Draw player (screen-relative)
         g.setColor(Color.BLUE);
-        g.fillRect((int)player.x, (int)player.y, player.width, player.height);
+        int playerScreenX = (int)Math.round(player.x - cameraX);
+        int playerScreenY = (int)Math.round(player.y - cameraY);
+        g.fillRect(playerScreenX, playerScreenY, player.width, player.height);
 
         // Draw hotbar
         int hotbarY = getHeight() - 48;
