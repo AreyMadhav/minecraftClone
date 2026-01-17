@@ -43,3 +43,7 @@ What's new (recent changes)
 - Visible-tile rendering: only tiles within the player's view are rendered for better performance.
 - Persistent modifications overlay: blocks placed/broken by the player are tracked so changes persist as you move.
 
+### Screenshots
+<img width="780" height="585" alt="image" src="https://github.com/user-attachments/assets/d43ec1e0-9936-4c9b-889b-2ebcca8904a3" />
+
+
