@@ -37,9 +37,8 @@ Notes
   - Player physics: `src/main/java/com/minecraftclone/minecraftclone/Player.java`
   - Block model: `src/main/java/com/minecraftclone/minecraftclone/Block.java`
 
-Next steps
-- Add textures or tile atlas for nicer visuals
-- Implement simple world features (trees, caves)
-- Add inventory counts and block drops
+---
+### Screenshots
+<img width="1647" height="738" alt="image" src="https://github.com/user-attachments/assets/e7f62cea-d718-4207-9a04-174d327d740f" />
 
-If you want, I can run the game here and report behavior, or implement one of the next steps.
+
